@@ -136,6 +136,59 @@ $ ulid --format=rfc3339 --local 01D78XZ44G0000000000000000
 2019-03-31T05:51:23.536+02:00
 ```
 
+## Streaming batch import validation
+
+When importing a batch of ULID records (one per line, e.g. from a file or
+pipe), `BatchValidator` validates them one at a time. It never buffers the
+whole input; at most the configured window of accepted records is retained.
+
+Each record is checked in this order:
+
+1. **Syntax** — parsed with [`ulid.ParseStrict`](https://pkg.go.dev/github.com/oklog/ulid/v2#ParseStrict),
+   enforcing the 26-character length, Crockford base32 alphabet, and the
+   128-bit overflow limit. Upper- and lower-case input are normalized by the
+   same parse rules as `Parse`. The default `Parse` is not changed.
+2. **Time order** — the 48-bit millisecond component must not be older than
+   the most recent *accepted* record. Two records with the same millisecond
+   but different random components are both allowed.
+3. **Uniqueness** — the parsed ULID must not equal a record still inside the
+   duplicate window.
+
+Rejected records (invalid, time-reversed, or duplicate) never advance the
+most recent timestamp and never enter the window, so a bad record in the
+middle of a stream cannot distort later checks. Each error is a
+`*ulid.RecordError` carrying the original 0-based record index and one of the
+categories `invalid`, `time-reversed`, or `duplicate`, and it unwraps to the
+matching sentinel (`ErrInvalidRecord`, `ErrTimeReversed`, `ErrDuplicate`).
+
+### Uniqueness guarantee scope
+
+`NewBatchValidator(0)` checks against **all** accepted records and guarantees
+global uniqueness within the validated stream. `NewBatchValidator(n)` keeps
+only the most recent *n* accepted records: memory is bounded, but the
+guarantee is explicitly limited to that window. A record that has left the
+window may repeat without being reported — a finite window does **not** claim
+global uniqueness. Ask for the exact wording with `UniquenessScope()` (or
+`StreamReport.UniquenessScope()` when streaming via `ValidateReader`).
+
+```go
+v := ulid.NewBatchValidator(1024) // duplicates within the last 1024 accepted records
+
+sc := bufio.NewScanner(r)
+for index := 0; sc.Scan(); index++ {
+    if id, err := v.Validate(index, sc.Text()); err != nil {
+        log.Printf("record %d rejected (%s): %s", err.Index, err.Category, err.Record)
+        continue
+    } else {
+        // import id
+    }
+}
+fmt.Println(v.UniquenessScope()) // states that only the window is guaranteed
+```
+
+For a reader-to-report convenience API, use `ValidateReader`, which returns a
+`StreamReport` with totals, per-record errors, and the window scope.
+
 ## Specification
 
 Below is the current specification of ULID as implemented in this repository.
