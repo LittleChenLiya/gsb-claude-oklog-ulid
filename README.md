@@ -104,6 +104,47 @@ If you don't care about time-based ordering of generated IDs, then there's no
 reason to use ULIDs! There are many other kinds of IDs that are easier, faster,
 smaller, etc. Consider UUIDs.
 
+## Batch validation
+
+When importing a stream of ULID records, the
+[ulid.BatchValidator](https://pkg.go.dev/github.com/oklog/ulid/v2#BatchValidator)
+validates records one at a time and emits one
+[ulid.BatchResult](https://pkg.go.dev/github.com/oklog/ulid/v2#BatchResult) per
+record, so the batch is never buffered. It detects three classes of error:
+
+- **Syntax errors** — records that fail strict parsing (wrong size, invalid
+  characters, or overflow).
+- **Time regressions** — records whose 48-bit millisecond timestamp is earlier
+  than the most recent valid record's. Two distinct ULIDs in the same
+  millisecond are not a regression, and case is normalized by the existing
+  parsing rules.
+- **Duplicates** — records that duplicate a valid record still retained in the
+  validator's window.
+
+Only valid records advance the time baseline and enter the duplicate-detection
+window, so a syntactically invalid or out-of-order record in the middle of the
+stream does not shift later results. Each result preserves its record's original
+zero-based index.
+
+```go
+v := ulid.NewBatchValidator(1024) // remember the 1024 most recent valid records
+scanner := bufio.NewScanner(stream)
+for scanner.Scan() {
+    result := v.Validate(scanner.Text())
+    if result.Err != nil {
+        log.Printf("record %d: %v", result.Index, result.Err)
+    }
+}
+```
+
+**Guarantee scope.** Duplicate detection is bounded by the window passed to
+`NewBatchValidator`: only the window most recent valid records are remembered. A
+record that is not reported as a duplicate is therefore guaranteed unique only
+within that window — never globally unique. Once a record ages out of the
+window it is no longer remembered, and re-importing it will not be flagged as a
+duplicate. A window of `0` remembers every valid record (exact global duplicate
+detection) at the cost of unbounded memory.
+
 ## Commandline tool
 
 This repo also provides a tool to generate and parse ULIDs at the command line.
