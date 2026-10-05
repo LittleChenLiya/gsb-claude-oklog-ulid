@@ -901,3 +901,128 @@ func BenchmarkCompare(b *testing.B) {
 		_ = id.Compare(other)
 	}
 }
+
+func TestTimeRange(t *testing.T) {
+	t.Parallel()
+
+	zeros := func() io.Reader { return bytes.NewReader(make([]byte, 16)) }
+	ones := func() io.Reader { return bytes.NewReader(bytes.Repeat([]byte{0xFF}, 16)) }
+
+	// Four ULID examples around the half-open range [10, 11):
+	before := ulid.MustNew(9, ones())  // time 9, max entropy: excluded
+	first := ulid.MustNew(10, zeros()) // time 10, zero entropy: included
+	last := ulid.MustNew(10, ones())   // time 10, max entropy: included
+	after := ulid.MustNew(11, zeros()) // time 11: excluded
+
+	r, err := ulid.TimeRange(10, 11)
+	if err != nil {
+		t.Fatalf("TimeRange(10, 11): unexpected error: %v", err)
+	}
+	if r.Empty {
+		t.Fatal("TimeRange(10, 11): range must not be empty")
+	}
+
+	// Boundaries carry all-zero / all-one entropy by boundary meaning.
+	if r.Min != first {
+		t.Errorf("Min = %v, want %v (time 10, zero entropy)", r.Min, first)
+	}
+	if r.Max != last {
+		t.Errorf("Max = %v, want %v (time 10, all-one entropy)", r.Max, last)
+	}
+
+	// Verify against the original ULID comparison rule.
+	for id, want := range map[ulid.ULID]bool{
+		before: false,
+		first:  true,
+		last:   true,
+		after:  false,
+	} {
+		if got := r.Contains(id); got != want {
+			t.Errorf("Contains(%v) = %v, want %v", id, got, want)
+		}
+		in := r.Min.Compare(id) <= 0 && id.Compare(r.Max) <= 0
+		if in != want {
+			t.Errorf("Compare-based membership of %v = %v, want %v", id, in, want)
+		}
+	}
+
+	// Every random value at time 10 is inside; times 9 and 11 are not.
+	for i := 0; i < 256; i++ {
+		id := ulid.MustNew(10, crand.Reader)
+		if !r.Contains(id) {
+			t.Fatalf("Contains(%v) = false, want true", id)
+		}
+	}
+
+	// String casing does not participate in ordering: lowercase and
+	// uppercase encodings of the same ULID are equally inside the range.
+	mixed := ulid.MustNew(10, crand.Reader)
+	if lo := ulid.MustParse(strings.ToLower(mixed.String())); !r.Contains(lo) {
+		t.Errorf("Contains(lowercase %v) = false, want true", lo)
+	}
+	if up := ulid.MustParse(strings.ToUpper(mixed.String())); !r.Contains(up) {
+		t.Errorf("Contains(uppercase %v) = false, want true", up)
+	}
+
+	// The bounds are directly usable as lexicographic byte ranges.
+	if !bytes.HasPrefix(r.Min.Bytes(), r.Min[:6]) || bytes.Compare(r.Min.Bytes(), r.Max.Bytes()) >= 0 {
+		t.Error("byte bounds are not ordered lexicographically")
+	}
+}
+
+func TestTimeRangeEmpty(t *testing.T) {
+	t.Parallel()
+
+	for _, bounds := range [][2]uint64{{10, 10}, {11, 10}, {0, 0}} {
+		r, err := ulid.TimeRange(bounds[0], bounds[1])
+		if err != nil {
+			t.Fatalf("TimeRange(%d, %d): unexpected error: %v", bounds[0], bounds[1], err)
+		}
+		if !r.Empty {
+			t.Errorf("TimeRange(%d, %d): Empty = false, want true", bounds[0], bounds[1])
+		}
+		if r.Contains(ulid.Zero) || r.Contains(ulid.MustNew(10, crand.Reader)) {
+			t.Errorf("TimeRange(%d, %d): empty range contains a ULID", bounds[0], bounds[1])
+		}
+	}
+}
+
+func TestTimeRangeOverflow(t *testing.T) {
+	t.Parallel()
+
+	if _, err := ulid.TimeRange(ulid.MaxTime()+1, ulid.MaxTime()+2); err != ulid.ErrBigTime {
+		t.Errorf("TimeRange(MaxTime+1, MaxTime+2) err = %v, want %v", err, ulid.ErrBigTime)
+	}
+}
+
+func TestTimeRangeMaxTail(t *testing.T) {
+	t.Parallel()
+
+	maxULID := ulid.ULID{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+
+	// The range reaching the last representable millisecond must clamp
+	// its maximum boundary to the all-ones ULID without overflowing.
+	r, err := ulid.TimeRange(ulid.MaxTime(), ulid.MaxTime()+1)
+	if err != nil {
+		t.Fatalf("TimeRange(MaxTime, MaxTime+1): unexpected error: %v", err)
+	}
+	if r.Max != maxULID {
+		t.Errorf("Max = %v, want %v", r.Max, maxULID)
+	}
+	if got := r.Max.Time(); got != ulid.MaxTime() {
+		t.Errorf("Max.Time() = %d, want %d (no overflow)", got, ulid.MaxTime())
+	}
+
+	// An end far beyond MaxTime clamps the same way.
+	r, err = ulid.TimeRange(0, math.MaxUint64)
+	if err != nil {
+		t.Fatalf("TimeRange(0, MaxUint64): unexpected error: %v", err)
+	}
+	if r.Min != ulid.Zero || r.Max != maxULID {
+		t.Errorf("bounds = [%v, %v], want [%v, %v]", r.Min, r.Max, ulid.Zero, maxULID)
+	}
+	if !r.Contains(maxULID) {
+		t.Error("clamped range does not contain the maximum ULID")
+	}
+}

@@ -432,6 +432,80 @@ var maxTime = ULID{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}.Time()
 // can be encoded in a ULID.
 func MaxTime() uint64 { return maxTime }
 
+// Range is an inclusive interval of ULIDs [Min, Max] covering exactly the
+// ULIDs produced by TimeRange. The zero Range is not empty by default;
+// check the Empty field to detect explicitly empty ranges.
+//
+// Min and Max are directly usable as lexicographic byte-range bounds for
+// ordered indexes (e.g. key >= Min[:] && key <= Max[:]), because ULID
+// ordering is defined on the binary representation — string casing never
+// participates in ordering. No ULID inside the interval is enumerated.
+type Range struct {
+	// Min is the smallest ULID in the interval: the range's start
+	// timestamp with an all-zero entropy component.
+	Min ULID
+
+	// Max is the largest ULID in the interval: the range's last
+	// timestamp with an all-one (0xFF) entropy component.
+	Max ULID
+
+	// Empty reports whether the range contains no ULIDs at all. When
+	// Empty is true, Min and Max are meaningless and Contains always
+	// returns false.
+	Empty bool
+}
+
+// Contains reports whether id falls within the range, using the same
+// lexicographic comparison rule as ULID.Compare.
+func (r Range) Contains(id ULID) bool {
+	return !r.Empty && r.Min.Compare(id) <= 0 && id.Compare(r.Max) <= 0
+}
+
+// TimeRange returns the inclusive ULID boundaries [Min, Max] that cover
+// exactly the ULIDs whose timestamps lie in the half-open millisecond
+// range [start, end).
+//
+// The minimum boundary carries an all-zero entropy component and the
+// maximum an all-one entropy component, so every ULID with a timestamp
+// in [start, end) sorts between them under the lexicographic byte order
+// used by Compare, and no ULID outside [start, end) does.
+//
+// Three edge cases are handled explicitly:
+//
+//   - Empty interval: if start >= end, a Range with Empty set to true is
+//     returned and no error occurs.
+//   - Time overflow: if start exceeds MaxTime, no ULID can represent the
+//     interval and ErrBigTime is returned.
+//   - Max-millisecond tail: if the interval extends beyond the last
+//     representable millisecond (end-1 > MaxTime), Max is clamped to the
+//     largest possible ULID (all 0xFF bytes) instead of overflowing the
+//     time component.
+func TimeRange(start, end uint64) (Range, error) {
+	if start >= end {
+		return Range{Empty: true}, nil
+	}
+	if start > maxTime {
+		return Range{}, ErrBigTime
+	}
+
+	last := end - 1
+	if last > maxTime {
+		last = maxTime
+	}
+
+	var r Range
+	if err := r.Min.SetTime(start); err != nil {
+		return Range{}, err
+	}
+	if err := r.Max.SetTime(last); err != nil {
+		return Range{}, err
+	}
+	for i := 6; i < len(r.Max); i++ {
+		r.Max[i] = 0xFF
+	}
+	return r, nil
+}
+
 // Now is a convenience function that returns the current
 // UTC time in Unix milliseconds. Equivalent to:
 //
