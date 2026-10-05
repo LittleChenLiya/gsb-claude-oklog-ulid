@@ -100,6 +100,23 @@ which means they are by default un-ordered. You can use
 to create ULIDs that are monotonic within a given millisecond, with caveats. See
 the documentation for details.
 
+For explicit control over the entropy source and generation lifecycle, use
+[ulid.NewSession](https://pkg.go.dev/github.com/oklog/ulid/v2#NewSession). A
+session owns its entropy source, keeps monotonic state for the current
+millisecond, reads only the bytes it actually needs (never prefetching), and
+distinguishes clock, entropy, and monotonic failures. A failed generation never
+advances the session's state, so a later successful generation does not skip
+any entropy. Once a session is closed, further generation is rejected.
+
+```go
+session := ulid.NewSession(rand.New(rand.NewSource(time.Now().UnixNano())))
+defer session.Close()
+
+id, receipt, err := session.Generate(ulid.Timestamp(time.Now()))
+// receipt.Stage: which stage produced the entropy (clock, entropy, monotonic)
+// receipt.Count: number of entropy bytes consumed from the source
+```
+
 If you don't care about time-based ordering of generated IDs, then there's no
 reason to use ULIDs! There are many other kinds of IDs that are easier, faster,
 smaller, etc. Consider UUIDs.
